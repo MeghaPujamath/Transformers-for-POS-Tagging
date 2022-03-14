@@ -1,7 +1,9 @@
+from turtle import forward
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model import POSTaggingModel
+import numpy as np
 
 import random
 torch.manual_seed(0)
@@ -27,12 +29,13 @@ class MultiHeadAttention(nn.Module):
         nn.init.xavier_normal_(self.w_v)
         nn.init.xavier_normal_(self.w_o)
 
+        self.fc = nn.Linear(n_head * self.d_qkv, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
         # The hyperparameters given as arguments to this function and others
         # should be sufficient to reach the score targets for this project
 
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        
     def forward(self, x, mask):
         """Runs the multi-head self-attention layer.
 
@@ -50,25 +53,33 @@ class MultiHeadAttention(nn.Module):
         # you need to write.
 
         # Apply linear projections to convert the feature vector at each token into separate vectors for the query, key, and value.
-        q = torch.einsum('???', x, self.w_q)
-        k = NotImplementedError
-        v = NotImplementedError
-        
-        # Apply attention, scaling the logits by 1 / d_{kqv} .
-        logits = NotImplementedError
-        scaled_logits = NotImplementedError
-        
-        # Ensure proper masking, such that padding tokens are never attended to.
-        mask = torch.where(mask[NotImplementedError, NotImplementedError, NotImplementedError, NotImplementedError], torch.zeros_like(dots),
-            -1e9 * torch.ones_like(dots))
+        q = torch.einsum('blm,hmd->blhd', x, self.w_q)
+        k = torch.einsum('blm,hmd->blhd', x, self.w_k)
+        v = torch.einsum('blm,hmd->blhd', x, self.w_v)  # b l h d
 
-        logits = logits + mask
-        
+        residual = x.clone()
+
+        # Apply attention, scaling the logits by 1 / d_{kqv} .
+        prod_key_queries = torch.einsum('blhd,bkhd->bhlk', q, k)
+        prod_key_queries_norm = prod_key_queries/(self.d_model ** (1/2))
+
+        # Ensure proper masking, such that padding tokens are never attended to.
+        if mask is not None:
+            mask = mask.unsqueeze(1).unsqueeze(2)
+            prod_key_queries_norm = prod_key_queries_norm.masked_fill(
+                mask == 0, float('-1e10'))
+
         # attention
-        prob = NotImplementedError
-        out = NotImplementedError
+        logits = torch.softmax(prod_key_queries_norm, dim=3)  # b, h, l, k
+        out = torch.einsum('bhlk,bkhd->blhd', [logits, v])  # b, l, h, d
+        # flattening last 2 dimensions
+        out = out.reshape(x.size(0), x.size(1), self.n_head * self.d_qkv)
+        out = self.fc(out)
+        out += residual
+        out = self.norm(out)
         return out
-        
+
+
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model, d_ff, dropout=0.1):
         super().__init__()
@@ -76,12 +87,20 @@ class PositionwiseFeedForward(nn.Module):
         self.w_1 = nn.Linear(d_model, d_ff)
         self.w_2 = nn.Linear(d_ff, d_model)
 
-        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
-        self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
+        self.norm = nn.LayerNorm(d_model, eps=1e-6)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        """YOUR CODE HERE"""
+        residual = x.clone()
+        x = self.w_1(x)
+        x = self.relu(x)
+
+        x = self.dropout(x)
+        x = self.w_2(x)
+        x += residual
+        x = self.norm(x)
+        return x
 
 
 class TransformerEncoder(nn.Module):
@@ -93,8 +112,12 @@ class TransformerEncoder(nn.Module):
         # `self.sublayers = [x, y, z]` with a plain python list instead of a
         # ModuleList, you might find that none of the sub-layer parameters are
         # trained.
-
-        """YOUR CODE HERE"""
+        self.multiHeadAttention = MultiHeadAttention(
+            d_model, n_head, d_qkv, dropout)
+        self.feed_forward = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask):
         """Runs the Transformer encoder.
@@ -109,8 +132,11 @@ class TransformerEncoder(nn.Module):
         Returns:
           A single tensor containing the output from the Transformer
         """
-
-        """YOUR CODE HERE"""
+        out = self.multiHeadAttention(x, mask)
+        out = self.feed_forward(out)
+        out = self.dropout(out)
+        out = self.norm2(out)
+        return out
 
 
 class AddPositionalEncoding(nn.Module):
@@ -138,12 +164,14 @@ class TransformerPOSTaggingModel(POSTaggingModel):
         super().__init__()
         d_model = 256
         self.add_timing = AddPositionalEncoding(d_model)
-        self.encoder = TransformerEncoder(d_model)
-        
+        self.stack = nn.ModuleList(
+            [TransformerEncoder(d_model) for _ in range(2)])
+
         """more starting code."""
         self.PAD_ID = vocab.PieceToId("<pad>")
-        """YOUR CODE HERE."""
-
+        self.embedding = nn.Embedding(vocab.GetPieceSize(), d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(p=0.1)
 
     def encode(self, batch):
         """
@@ -162,6 +190,10 @@ class TransformerPOSTaggingModel(POSTaggingModel):
         """YOUR CODE HERE."""
         ids = batch['ids']
         mask = ids != self.PAD_ID
-        
-        x = NotImplementedError
+
+        x = self.embedding(ids)
+        x = self.add_timing(x)
+
+        for e in self.stack:
+            x = e(x, mask)
         return x

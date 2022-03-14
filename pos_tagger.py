@@ -1,6 +1,7 @@
 ###### Transformer for Part-of-Speech Tagging #####
 # In this task, we will label each word token in a sentence or corpus with a part-of-speech tag. We provide you with all of the data processing code and a baseline model. You will implement the model using the Transformer architecture in transformer.py
 ###################################################
+import time
 from transformer import TransformerPOSTaggingModel
 from model import BaselineModel
 from torch.nn.utils.rnn import pad_sequence
@@ -12,6 +13,7 @@ import nltk
 from nltk.corpus.reader.bracket_parse import BracketParseCorpusReader
 nltk.download('tagsets')
 
+start = time.time()
 
 device = torch.device("cpu")
 print("Using device:", device)
@@ -295,6 +297,7 @@ def main():
     else:
         run_transformer_tagger(data_reader, vocab, PARTS_OF_SPEECH)
 
+    print(f"Total Time taken is {time.time() - start}")
     return
 
 
